@@ -1,5 +1,5 @@
 {
-	"name" : "dpgover/zoho-crm-copy-db",
+	"name" : "wabel/zoho-crm-copy-db",
 	"description" : "This package contains code to help you copy ZohoCRM records directly into your database.",
 	"type" : "library",
 	"license" : "MIT",
@@ -12,7 +12,7 @@
 	],
 	"require" : {
 		"php" : ">=5.6",
-		"dpgover/zoho-crm-orm": "~1.1",
+		"wabel/zoho-crm-orm": "~1.1",
 		"doctrine/dbal": "~2.5",
 		"symfony/console": "~2.0 | ~3.0",
 		"mouf/utils.common.lock": "~1.0",
