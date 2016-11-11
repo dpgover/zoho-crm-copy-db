@@ -88,7 +88,7 @@ class ZohoDatabaseCopier
 
         $flatFields = $this->getFlatFields($dao->getFields());
 
-        $table->addColumn('id', 'string', ['length' => 100]);
+        $table->addColumn('id', 'text');
         $table->setPrimaryKey(['id']);
 
         foreach ($flatFields as $field) {
@@ -101,28 +101,22 @@ class ZohoDatabaseCopier
             switch ($field['type']) {
                 case 'Lookup ID':
                 case 'Lookup':
-                    $type = 'string';
-                    $length = 100;
+                    $type = 'text';
                     $index = true;
                     break;
                 case 'OwnerLookup':
-                    $type = 'string';
+                    $type = 'text';
                     $index = true;
-                    $length = 25;
                     break;
                 case 'Formula':
                     // Note: a Formula can return any type, but we have no way to know which type it returns...
-                    $type = 'string';
-                    $length = 100;
+                    $type = 'text';
                     break;
                 case 'DateTime':
                     $type = 'datetime';
                     break;
                 case 'Date':
                     $type = 'date';
-                    break;
-                case 'DateTime':
-                    $type = 'datetime';
                     break;
                 case 'Boolean':
                     $type = 'boolean';
@@ -141,8 +135,7 @@ class ZohoDatabaseCopier
                 case 'Website':
                 case 'Pick List':
                 case 'Multiselect Pick List':
-                    $type = 'string';
-                    $length = $field['maxlength'];
+                    $type = 'text';
                     break;
                 case 'Double':
                 case 'Percent':
@@ -218,8 +211,8 @@ class ZohoDatabaseCopier
     {
         $tableName = $this->getTableName($dao);
 
+        $lastActivityTime = null;
         if ($incrementalSync) {
-            $this->logger->info("Copying incremental data for '$tableName'");
             // Let's get the last modification date:
             $lastActivityTime = $this->connection->fetchColumn('SELECT MAX(lastActivityTime) FROM '.$tableName);
             if ($lastActivityTime !== null) {
@@ -228,13 +221,10 @@ class ZohoDatabaseCopier
                 // Let's add one second to the last activity time (otherwise, we are fetching again the last record in DB).
                 $lastActivityTime->add(new \DateInterval("PT1S"));
             }
-
-            $records = $dao->getRecords(null, null, $lastActivityTime);
+            $this->logger->info("Copying incremental data for '$tableName'");
         } else {
             $this->logger->notice("Copying FULL data for '$tableName'");
-            $records = $dao->getRecords();
         }
-        $this->logger->info("Fetched ".count($records)." records");
 
         $table = $this->connection->getSchemaManager()->createSchema()->getTable($tableName);
 
@@ -244,50 +234,73 @@ class ZohoDatabaseCopier
             $fieldsByName[$field['name']] = $field;
         }
 
+        $fieldsByName = array_change_key_case($fieldsByName);
+
         $select = $this->connection->prepare('SELECT * FROM '.$tableName.' WHERE id = :id');
 
         $this->connection->beginTransaction();
 
-        foreach ($records as $record) {
-            $data = [];
-            $types = [];
-            foreach ($table->getColumns() as $column) {
-                if ($column->getName() === 'id') {
-                    continue;
+        $limit = 1000;
+        $page = 1;
+        $offset = ($page - 1) * $limit;
+        $i = 0;
+        while($records = $dao->getPaginatedRecords(null, null, $lastActivityTime, null, $limit, $offset))
+        {
+            foreach ($records as $record) {
+                $data = [];
+                $types = [];
+                foreach ($table->getColumns() as $column) {
+                    if ($column->getName() === 'id') {
+                        continue;
+                    } else {
+                        $field = $fieldsByName[strtolower($column->getName())];
+                        $getterName = $field['getter'];
+                        $formattedData = $record->$getterName();
+                        if(is_array($formattedData))
+                        {
+                            $formattedData = json_encode($formattedData);
+                        }
+
+                        $data[$column->getName()] = $formattedData;
+                        $types[$column->getName()] = $column->getType()->getName();
+                    }
+                }
+
+                $select->execute(['id' => $record->getZohoId()]);
+                $result = $select->fetch(\PDO::FETCH_ASSOC);
+                if ($result === false) {
+                    $this->logger->debug("Inserting record with ID '".$record->getZohoId()."'.");
+
+                    $data['id'] = $record->getZohoId();
+                    $types['id'] = 'text';
+
+                    $this->connection->insert($tableName, $data, $types);
+
+                    foreach ($this->listeners as $listener) {
+                        $listener->onInsert($data, $dao);
+                    }
                 } else {
-                    $field = $fieldsByName[$column->getName()];
-                    $getterName = $field['getter'];
-                    $data[$column->getName()] = $record->$getterName();
-                    $types[$column->getName()] = $column->getType()->getName();
+                    $this->logger->debug("Updating record with ID '".$record->getZohoId()."'.");
+                    $identifier = ['id' => $record->getZohoId()];
+                    $types['id'] = 'text';
+
+                    $this->connection->update($tableName, $data, $identifier, $types);
+
+                    // Let's add the id for the update trigger
+                    $data['id'] = $record->getZohoId();
+                    foreach ($this->listeners as $listener) {
+                        $listener->onUpdate($data, $result, $dao);
+                    }
                 }
+
+                $i++;
+
+                $this->logger->info("$tableName: Processed record $i");
+                echo "$tableName: Processed record $i \n";
             }
 
-            $select->execute(['id' => $record->getZohoId()]);
-            $result = $select->fetch(\PDO::FETCH_ASSOC);
-            if ($result === false) {
-                $this->logger->debug("Inserting record with ID '".$record->getZohoId()."'.");
-
-                $data['id'] = $record->getZohoId();
-                $types['id'] = 'string';
-
-                $this->connection->insert($tableName, $data, $types);
-
-                foreach ($this->listeners as $listener) {
-                    $listener->onInsert($data, $dao);
-                }
-            } else {
-                $this->logger->debug("Updating record with ID '".$record->getZohoId()."'.");
-                $identifier = ['id' => $record->getZohoId()];
-                $types['id'] = 'string';
-
-                $this->connection->update($tableName, $data, $identifier, $types);
-
-                // Let's add the id for the update trigger
-                $data['id'] = $record->getZohoId();
-                foreach ($this->listeners as $listener) {
-                    $listener->onUpdate($data, $result, $dao);
-                }
-            }
+            $page++;
+            $offset = ($page - 1) * $limit;
         }
 
         $this->connection->commit();
@@ -310,7 +323,7 @@ class ZohoDatabaseCopier
      *
      * @return string
      */
-    private function getTableName(AbstractZohoDao $dao)
+    public function getTableName(AbstractZohoDao $dao)
     {
         $tableName = $this->prefix.$dao->getPluralModuleName();
         $tableName = s($tableName)->upperCamelize()->underscored();
